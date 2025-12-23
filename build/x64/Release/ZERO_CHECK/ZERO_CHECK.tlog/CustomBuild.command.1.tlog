@@ -1,6 +1,6 @@
-^C:\USERS\DEVIN FREDERICK\ONEDRIVE\DOCUMENTS\VSCODE\MESHCORECUDAKEYGEN\BUILD\CMAKEFILES\D8356EB83F7DCC27A3B41C89BB7CBF2B\GENERATE.STAMP.RULE
+^C:\DEV\MESHCORECUDAKEYGEN\BUILD\CMAKEFILES\9AC245DEFDA5CAE3DE3F507BF023FFCE\GENERATE.STAMP.RULE
 setlocal
-"C:\Program Files\CMake\bin\cmake.exe" "-SC:/Users/Devin Frederick/OneDrive/Documents/VSCode/MeshcoreCudaKeygen" "-BC:/Users/Devin Frederick/OneDrive/Documents/VSCode/MeshcoreCudaKeygen/build" --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file "C:/Users/Devin Frederick/OneDrive/Documents/VSCode/MeshcoreCudaKeygen/build/meshcore_cuda_keygen.sln"
+"C:\Program Files\CMake\bin\cmake.exe" -SC:/dev/MeshcoreCudaKeygen -BC:/dev/MeshcoreCudaKeygen/build --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file C:/dev/MeshcoreCudaKeygen/build/meshcore_cuda_keygen.sln
 if %errorlevel% neq 0 goto :cmEnd
 :cmEnd
 endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone

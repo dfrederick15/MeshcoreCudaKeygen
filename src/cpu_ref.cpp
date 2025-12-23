@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025 Devin Frederick
 #include "cpu_ref.h"
 #include <openssl/evp.h>
 #include <openssl/sha.h>

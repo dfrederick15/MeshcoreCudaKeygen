@@ -38,6 +38,10 @@ add_executable(meshcore_cuda_keygen
   src/seed_gen.cu
   src/cpu_ref.cpp
   src/gpu_search_ed25519_cuda.cu
+  src/ed25519_pubonly.cu
+  src/seedpool.cu
+  src/gpu_search_ed25519_cuda.cu
+  src/gpu_search_ed25519_cuda.h
   ${ED25519_CUDA_SOURCES}
 )
 
@@ -82,3 +86,13 @@ set_target_properties(meshcore_cuda_keygen_gui PROPERTIES
 if (MSVC)
   target_link_options(meshcore_cuda_keygen_gui PRIVATE "/SUBSYSTEM:WINDOWS")
 endif()
+
+target_include_directories(meshcore_cuda_keygen_gui PRIVATE
+  ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_SOURCE_DIR}/external/ed25519_cuda
+)
+
+target_sources(meshcore_cuda_keygen_gui PRIVATE
+  src/ed25519_pubonly.cu
+  src/seedpool.cu
+)

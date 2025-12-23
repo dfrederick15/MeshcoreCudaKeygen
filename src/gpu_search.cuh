@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025 Devin Frederick
 #pragma once
 #include <cstdint>
 #include <cstddef>

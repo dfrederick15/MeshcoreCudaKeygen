@@ -1,284 +1,804 @@
-// src/main.cpp
-#include <cstdio>
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025 Devin Frederick
+// src/gui_main.cpp
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <commctrl.h>
+
 #include <string>
-#include <cctype>
-#include <vector>
-#include <array>
-#include <thread>
 #include <atomic>
-#include <mutex>
 #include <chrono>
-#include <stdexcept>
+#include <sstream>
+#include <iomanip>
 #include <cstring>
+#include <cmath>
+#include <cstdint>
 
 #include <cuda_runtime.h>
 
-#include "cpu_ref.h"
-#include "seed_gen.cuh"
 #include "gpu_search_ed25519_cuda.h"
+#include "cpu_ref.h" // hex_of(), make_keypair_from_seed()
 
-void launch_test();
+#pragma comment(lib, "Comctl32.lib")
 
-// ---------------- Prefix matcher (byte/nibble, no hex conversion) ----------------
-static bool matches_hex_prefix(const std::array<unsigned char,32>& pub, const std::string& hexPrefixRaw) {
-  std::string hexPrefix;
-  hexPrefix.reserve(hexPrefixRaw.size());
-  for (char c : hexPrefixRaw) {
-    if (!std::isspace((unsigned char)c)) hexPrefix.push_back((char)std::tolower((unsigned char)c));
+// -------------------- Control IDs --------------------
+enum : int {
+  IDC_PREFIX    = 101,
+  IDC_BATCH     = 102,
+  IDC_POOL_MB   = 103,
+
+  IDC_START     = 110,
+  IDC_STOP      = 111,
+  IDC_BENCH     = 112,
+
+  IDC_GPU_NAME  = 120,
+  IDC_GPU_LOAD  = 121,
+  IDC_TRIES     = 122,
+  IDC_SPEED     = 123,
+  IDC_RUNTIME   = 124,
+  IDC_POOL_INFO = 125,
+
+  IDC_EST_BOX   = 130, // multiline estimate box
+
+  IDC_RESULT_PUB  = 140,
+  IDC_RESULT_PRIV = 141,
+};
+
+static const UINT WM_APP_RATE      = WM_APP + 1;
+static const UINT WM_APP_FOUND     = WM_APP + 2;
+static const UINT WM_APP_ERROR     = WM_APP + 3;
+static const UINT WM_APP_BENCHDONE = WM_APP + 4;
+
+static const UINT_PTR TIMER_UI = 1;
+
+// -------------------- Globals --------------------
+static HWND g_hwndMain   = nullptr;
+static HWND g_hPrefix    = nullptr;
+static HWND g_hBatch     = nullptr;
+static HWND g_hPoolMB    = nullptr;
+
+static HWND g_hStart     = nullptr;
+static HWND g_hStop      = nullptr;
+static HWND g_hBench     = nullptr;
+
+static HWND g_hGpuName   = nullptr;
+static HWND g_hGpuLoad   = nullptr;
+static HWND g_hTries     = nullptr;
+static HWND g_hSpeed     = nullptr;
+static HWND g_hRuntime   = nullptr;
+static HWND g_hPoolInfo  = nullptr;
+
+static HWND g_hEstBox    = nullptr;
+
+static HWND g_hPub       = nullptr;
+static HWND g_hPriv      = nullptr;
+
+static HANDLE g_worker = nullptr;
+static HANDLE g_benchThread = nullptr;
+
+static std::atomic<bool> g_running{false};
+static std::atomic<bool> g_stop{false};
+
+static std::atomic<unsigned long long> g_totalTries{0};     // exact integer
+static std::atomic<unsigned long long> g_lastRateKps{0};    // integer keys/sec
+static std::atomic<unsigned long long> g_benchRateKps{0};   // integer keys/sec
+static std::atomic<bool> g_benchRunning{false};
+
+// Runtime timer
+static std::atomic<bool> g_timerArmed{false};
+static std::atomic<bool> g_foundFreeze{false};
+static std::chrono::steady_clock::time_point g_runStart{};
+static std::chrono::steady_clock::time_point g_runEnd{};
+
+// Seed base counter (deterministic per regenerate)
+static std::atomic<unsigned long long> g_seedBaseCounter{0x12345678ABCDEF00ULL};
+
+// -------------------- UTF helpers --------------------
+static std::wstring utf8_to_wstring(const std::string& s) {
+  if (s.empty()) return L"";
+  int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), nullptr, 0);
+  std::wstring w(n, L'\0');
+  MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), w.data(), n);
+  return w;
+}
+
+static std::string wstring_to_utf8(const std::wstring& w) {
+  if (w.empty()) return "";
+  int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), nullptr, 0, nullptr, nullptr);
+  std::string s(n, '\0');
+  WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), s.data(), n, nullptr, nullptr);
+  return s;
+}
+
+static std::wstring get_text_w(HWND h) {
+  int len = GetWindowTextLengthW(h);
+  std::wstring w(len, L'\0');
+  GetWindowTextW(h, w.data(), len + 1);
+  return w;
+}
+
+// -------------------- Pretty formatting --------------------
+static std::wstring fmt_commas_u64(unsigned long long v) {
+  std::wstring s = std::to_wstring(v);
+  int insertPos = (int)s.size() - 3;
+  while (insertPos > 0) {
+    s.insert((size_t)insertPos, 1, L',');
+    insertPos -= 3;
   }
-  if (hexPrefix.empty()) return true;
+  return s;
+}
 
-  size_t fullBytes = hexPrefix.size() / 2;
-  bool hasNibble = (hexPrefix.size() % 2) != 0;
+static std::wstring fmt_percent(double p01) {
+  if (!std::isfinite(p01)) return L"N/A";
+  if (p01 < 0.0) p01 = 0.0;
+  if (p01 > 1.0) p01 = 1.0;
+  std::wstringstream ss;
+  ss << std::fixed << std::setprecision(1) << (p01 * 100.0) << L"%";
+  return ss.str();
+}
 
-  auto hexval = [](char h)->int{
-    if (h>='0' && h<='9') return h-'0';
-    if (h>='a' && h<='f') return 10 + (h-'a');
-    return -1;
-  };
-
-  for (size_t i = 0; i < fullBytes; i++) {
-    int hi = hexval(hexPrefix[2*i]);
-    int lo = hexval(hexPrefix[2*i+1]);
-    if (hi<0 || lo<0) return false;
-    unsigned char b = (unsigned char)((hi<<4) | lo);
-    if (pub[i] != b) return false;
+static std::wstring fmt_seconds(double sec) {
+  if (!std::isfinite(sec) || sec < 0) return L"N/A";
+  if (sec < 1.0) { std::wstringstream ss; ss << std::fixed << std::setprecision(2) << sec << L"s"; return ss.str(); }
+  if (sec < 60.0) { std::wstringstream ss; ss << std::fixed << std::setprecision(1) << sec << L"s"; return ss.str(); }
+  if (sec < 3600.0) {
+    int m = (int)(sec / 60.0);
+    int s = (int)std::fmod(sec, 60.0);
+    std::wstringstream ss; ss << m << L"m " << s << L"s"; return ss.str();
   }
-  if (hasNibble) {
-    int hi = hexval(hexPrefix[2*fullBytes]);
-    if (hi<0) return false;
-    unsigned char want = (unsigned char)(hi << 4);
-    if ( (pub[fullBytes] & 0xF0) != want ) return false;
+  if (sec < 86400.0) {
+    int h = (int)(sec / 3600.0);
+    int m = (int)std::fmod(sec, 3600.0) / 60;
+    std::wstringstream ss; ss << h << L"h " << m << L"m"; return ss.str();
   }
+  int d = (int)(sec / 86400.0);
+  int h = (int)std::fmod(sec, 86400.0) / 3600;
+  std::wstringstream ss; ss << d << L"d " << h << L"h"; return ss.str();
+}
+
+static std::wstring fmt_elapsed_hms(double sec) {
+  if (!std::isfinite(sec) || sec < 0) sec = 0;
+  unsigned long long s = (unsigned long long)(sec);
+  unsigned long long h = s / 3600ULL;
+  unsigned long long m = (s % 3600ULL) / 60ULL;
+  unsigned long long r = s % 60ULL;
+  std::wstringstream ss;
+  ss << std::setfill(L'0') << std::setw(2) << h << L":" << std::setw(2) << m << L":" << std::setw(2) << r;
+  return ss.str();
+}
+
+// variance meter bar (0..3x expected shown)
+static std::wstring variance_bar(double progress) {
+  // progress = tries / expected
+  // show up to 3.0x expected
+  if (!std::isfinite(progress) || progress < 0) progress = 0;
+  if (progress > 3.0) progress = 3.0;
+
+  const int width = 30;
+  int filled = (int)std::round((progress / 3.0) * width);
+  if (filled < 0) filled = 0;
+  if (filled > width) filled = width;
+
+  std::wstring bar;
+  bar.reserve(width + 2);
+  bar.push_back(L'[');
+  for (int i = 0; i < width; i++) bar.push_back(i < filled ? L'#' : L'-');
+  bar.push_back(L']');
+
+  return bar;
+}
+
+// -------------------- NVML (optional, avoid nvml headers) --------------------
+static HMODULE g_nvml = nullptr;
+static bool g_nvmlReady = false;
+static void* g_nvmlDev = nullptr;
+
+static int (*p_nvmlInit_v2)() = nullptr;
+static int (*p_nvmlShutdown)() = nullptr;
+static int (*p_nvmlDeviceGetHandleByIndex_v2)(unsigned int, void**) = nullptr;
+static int (*p_nvmlDeviceGetUtilizationRates)(void*, void*) = nullptr;
+
+#pragma pack(push, 1)
+struct NvmlUtilRaw { uint32_t gpu; uint32_t memory; };
+#pragma pack(pop)
+
+static void nvml_try_init() {
+  if (g_nvmlReady) return;
+  g_nvml = LoadLibraryW(L"nvml.dll");
+  if (!g_nvml) return;
+
+  p_nvmlInit_v2 = (int (*)())GetProcAddress(g_nvml, "nvmlInit_v2");
+  p_nvmlShutdown = (int (*)())GetProcAddress(g_nvml, "nvmlShutdown");
+  p_nvmlDeviceGetHandleByIndex_v2 = (int (*)(unsigned int, void**))GetProcAddress(g_nvml, "nvmlDeviceGetHandleByIndex_v2");
+  p_nvmlDeviceGetUtilizationRates = (int (*)(void*, void*))GetProcAddress(g_nvml, "nvmlDeviceGetUtilizationRates");
+
+  if (!p_nvmlInit_v2 || !p_nvmlShutdown || !p_nvmlDeviceGetHandleByIndex_v2 || !p_nvmlDeviceGetUtilizationRates) {
+    FreeLibrary(g_nvml); g_nvml = nullptr; return;
+  }
+  if (p_nvmlInit_v2() != 0) { FreeLibrary(g_nvml); g_nvml = nullptr; return; }
+  if (p_nvmlDeviceGetHandleByIndex_v2(0, &g_nvmlDev) != 0) {
+    p_nvmlShutdown(); FreeLibrary(g_nvml); g_nvml = nullptr; return;
+  }
+  g_nvmlReady = true;
+}
+
+static bool nvml_get_gpu_load(unsigned int& outGpuPercent) {
+  if (!g_nvmlReady) return false;
+  NvmlUtilRaw u{};
+  if (p_nvmlDeviceGetUtilizationRates(g_nvmlDev, &u) != 0) return false;
+  outGpuPercent = (unsigned int)u.gpu;
   return true;
 }
 
-// ---------------- Parallel CPU verify over a pinned buffer ----------------
-static void verify_batch_parallel(
-  const uint8_t* h_seeds, size_t count,
-  const std::string& prefix,
-  unsigned int threads,
-  std::atomic<bool>& found,
-  std::mutex& foundMu,
-  KeypairResult& foundKp,
-  std::atomic<uint64_t>& totalTries
-) {
-  std::vector<std::thread> workers;
-  workers.reserve(threads);
-
-  auto worker = [&](size_t startIdx, size_t endIdx) {
-    for (size_t i = startIdx; i < endIdx; i++) {
-      if (found.load(std::memory_order_relaxed)) return;
-
-      std::array<unsigned char,32> seed{};
-      const uint8_t* p = &h_seeds[i * 32];
-      for (int k = 0; k < 32; k++) seed[k] = (unsigned char)p[k];
-
-      auto kp = make_keypair_from_seed(seed);
-      uint64_t triesNow = totalTries.fetch_add(1, std::memory_order_relaxed) + 1;
-
-      if (matches_hex_prefix(kp.pub, prefix)) {
-        bool expected = false;
-        if (found.compare_exchange_strong(expected, true, std::memory_order_relaxed)) {
-          std::lock_guard<std::mutex> lg(foundMu);
-          foundKp = kp;
-          std::printf("\nFOUND after %llu tries\n", (unsigned long long)triesNow);
-        }
-        return;
-      }
-    }
-  };
-
-  size_t chunk = (count + threads - 1) / threads;
-  for (unsigned int t = 0; t < threads; t++) {
-    size_t s = (size_t)t * chunk;
-    size_t e = s + chunk;
-    if (s >= count) break;
-    if (e > count) e = count;
-    workers.emplace_back(worker, s, e);
-  }
-
-  for (auto& th : workers) th.join();
+static void nvml_shutdown() {
+  if (g_nvmlReady) { p_nvmlShutdown(); g_nvmlReady = false; }
+  if (g_nvml) { FreeLibrary(g_nvml); g_nvml = nullptr; }
+  g_nvmlDev = nullptr;
 }
 
-static void print_usage(const char* exe) {
-  std::printf(
-    "Usage:\n"
-    "  %s <prefixHex> <batch> [cpuThreads]           (Mode A: GPU seedgen + CPU verify)\n"
-    "  %s --gpu <prefixHex> <batch>                 (Mode C: GPU pubkey+scan + GPU priv64)\n"
-    "\n"
-    "Examples:\n"
-    "  %s 146880 500000\n"
-    "  %s --gpu 146880 500000\n",
-    exe, exe, exe, exe
-  );
+// -------------------- Prefix + estimates --------------------
+static int prefix_nibbles_from_text(const std::string& sRaw) {
+  int n = 0;
+  for (char c : sRaw) {
+    if (c == ' ' || c == '\t' || c == '\r' || c == '\n') continue;
+    if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) { n++; continue; }
+    break;
+  }
+  return n;
 }
 
-int main(int argc, char** argv) {
-  launch_test();
+// expected tries for random match: 16^N / 2 (geometric mean)
+static double expected_tries_nibbles(int n) {
+  if (n <= 0) return 1.0;
+  return std::pow(16.0, (double)n) / 2.0;
+}
 
-  if (argc < 2) {
-    print_usage(argv[0]);
-    return 1;
+// 95% quantile tries for geometric: ~ ln(20) * mean (mean=16^N)
+static double tries_p95_nibbles(int n) {
+  if (n <= 0) return 1.0;
+  double mean = std::pow(16.0, (double)n);
+  return mean * std::log(20.0);
+}
+
+static double prob_found_by_tries(double tries, double mean) {
+  if (!(mean > 0.0) || tries < 0.0) return 0.0;
+  double x = tries / mean;
+  if (x > 700.0) return 1.0;
+  return 1.0 - std::exp(-x);
+}
+
+static double prob_find_within_seconds(double kps, double dtSec, double mean) {
+  if (!(mean > 0.0) || kps <= 0.0 || dtSec <= 0.0) return 0.0;
+  double x = (kps * dtSec) / mean;
+  if (x > 700.0) return 1.0;
+  return 1.0 - std::exp(-x);
+}
+
+// -------------------- UI helpers --------------------
+static void set_text(HWND h, const std::wstring& w) { SetWindowTextW(h, w.c_str()); }
+
+static double get_elapsed_seconds() {
+  if (!g_timerArmed.load(std::memory_order_relaxed)) return 0.0;
+  auto end = (g_running.load(std::memory_order_relaxed) && !g_foundFreeze.load(std::memory_order_relaxed))
+    ? std::chrono::steady_clock::now()
+    : g_runEnd;
+  return std::chrono::duration<double>(end - g_runStart).count();
+}
+
+static void update_estimates_box() {
+  const unsigned long long tries = g_totalTries.load(std::memory_order_relaxed);
+  const unsigned long long liveKps = g_lastRateKps.load(std::memory_order_relaxed);
+  const unsigned long long benchKps = g_benchRateKps.load(std::memory_order_relaxed);
+
+  const std::string prefix = wstring_to_utf8(get_text_w(g_hPrefix));
+  const int nNibbles = prefix_nibbles_from_text(prefix);
+
+  const unsigned long long kpsUseU64 =
+    (g_running.load(std::memory_order_relaxed) && liveKps > 0) ? liveKps : benchKps;
+
+  if (nNibbles <= 0 || kpsUseU64 == 0) {
+    std::wstring benchNote = (benchKps > 0) ? (L"\r\nBench: " + fmt_commas_u64(benchKps) + L" keys/sec") : L"";
+    set_text(g_hEstBox, L"Enter a hex prefix and run Benchmark or Start to compute ETA." + benchNote);
+    return;
   }
 
-  bool useGpuPubScan = false;
-  int argi = 1;
+  const double kpsUse = (double)kpsUseU64;
 
-  if (std::string(argv[argi]) == "--gpu") {
-    useGpuPubScan = true;
-    argi++;
-    if (argc - argi < 2) {
-      print_usage(argv[0]);
-      return 1;
-    }
+  const double mean = std::pow(16.0, (double)nNibbles);     // mean tries for success
+  const double expected = expected_tries_nibbles(nNibbles); // 16^N / 2
+  const double p95 = tries_p95_nibbles(nNibbles);
+
+  const double eta_expected = expected / kpsUse;
+  const double eta_p95 = p95 / kpsUse;
+
+  const double progress = (expected > 0.0) ? ((double)tries / expected) : 0.0;
+
+  const double p_found_now = prob_found_by_tries((double)tries, mean);
+  const double p_next_60s  = prob_find_within_seconds(kpsUse, 60.0, mean);
+  const double p_next_10m  = prob_find_within_seconds(kpsUse, 600.0, mean);
+
+  std::wstringstream ss;
+  ss << L"Prefix length: " << nNibbles << L" hex chars\r\n"
+     << L"Expected tries: ~" << fmt_commas_u64((unsigned long long)expected) << L"\r\n"
+     << L"ETA(avg): " << fmt_seconds(eta_expected) << L"   ETA(95%): " << fmt_seconds(eta_p95)
+     << L"   (" << (g_running.load(std::memory_order_relaxed) ? L"live" : L"bench") << L")\r\n"
+     << L"Progress vs expected: " << std::fixed << std::setprecision(2) << progress << L"x  "
+     << variance_bar(progress) << L"\r\n"
+     << L"P(found by now): " << fmt_percent(p_found_now)
+     << L"   P(next 60s): " << fmt_percent(p_next_60s)
+     << L"   P(next 10m): " << fmt_percent(p_next_10m);
+
+  set_text(g_hEstBox, ss.str());
+}
+
+static void update_ui_all() {
+  const unsigned long long tries = g_totalTries.load(std::memory_order_relaxed);
+  const unsigned long long liveKps = g_lastRateKps.load(std::memory_order_relaxed);
+
+  set_text(g_hTries, L"Keys tried: " + fmt_commas_u64(tries));
+  set_text(g_hSpeed, L"Speed: " + fmt_commas_u64(liveKps) + L" keys/sec");
+
+  const double elapsed = get_elapsed_seconds();
+  set_text(g_hRuntime, L"Runtime: " + fmt_elapsed_hms(elapsed));
+
+  // seed pool info
+  size_t poolSeeds = gpu_seedpool_seed_count();
+  if (poolSeeds > 0) {
+    set_text(g_hPoolInfo, L"Pool: " + fmt_commas_u64((unsigned long long)poolSeeds) + L" seeds");
+  } else {
+    set_text(g_hPoolInfo, L"Pool: -");
   }
 
-  // ---------------- Mode C: GPU pubkey generation + GPU scan + GPU priv64 ----------------
-  if (useGpuPubScan) {
-    std::string prefix = argv[argi++];
-    int batch = std::stoi(argv[argi++]);
-    if (batch <= 0) {
-      std::printf("batch must be > 0\n");
-      return 1;
-    }
+  update_estimates_box();
+}
 
-    std::printf("Mode C (--gpu): GPU pubkey+scan for prefix '%s' with batch=%d\n", prefix.c_str(), batch);
+// -------------------- Worker params --------------------
+struct WorkerParams {
+  std::string prefix;
+  size_t batch = 500000;
+  size_t poolBytes = 0;
+};
 
-    uint64_t total = 0;
-    auto t0 = std::chrono::steady_clock::now();
-    auto lastPrint = t0;
+// -------------------- Worker thread --------------------
+static DWORD WINAPI WorkerProc(LPVOID lp) {
+  WorkerParams* p = (WorkerParams*)lp;
 
-    while (true) {
-      GpuHit hit;
-      try {
-        hit = gpu_find_pubkey_prefix_ed25519_cuda(prefix, batch);
-      } catch (const std::exception& e) {
-        std::printf("GPU search error: %s\n", e.what());
-        return 1;
-      }
+  g_totalTries.store(0, std::memory_order_relaxed);
+  g_lastRateKps.store(0, std::memory_order_relaxed);
 
-      total += (uint64_t)batch;
+  cudaStream_t stream = 0;
 
-      auto now = std::chrono::steady_clock::now();
-      if (now - lastPrint >= std::chrono::seconds(2)) {
-        lastPrint = now;
-        double secs = std::chrono::duration<double>(now - t0).count();
-        double rate = (secs > 0.0) ? (total / secs) : 0.0;
-        std::printf("...%llu tries (%.0f keys/sec)\n", (unsigned long long)total, rate);
-      }
-
-      if (hit.found) {
-        // Correctness check: CPU recompute pub from seed and compare to GPU pub
-        {
-          std::array<unsigned char,32> seedArr{};
-          for (int i = 0; i < 32; i++) seedArr[i] = hit.seed[i];
-          auto cpuKp = make_keypair_from_seed(seedArr);
-          if (memcmp(cpuKp.pub.data(), hit.pub, 32) != 0) {
-            std::printf("ERROR: GPU pubkey does not match CPU pubkey for the winning seed.\n");
-            std::printf("GPU pub: %s\n", hex_of(hit.pub, 32).c_str());
-            std::printf("CPU pub: %s\n", hex_of(cpuKp.pub.data(), 32).c_str());
-            return 1;
-          }
-        }
-
-        std::string pubHex  = hex_of(hit.pub, 32);
-        std::string privHex = hex_of(hit.priv64, 64);
-
-        std::printf("\nFOUND after %llu tries\n", (unsigned long long)total);
-        std::printf("{\n  \"public_key\": \"%s\",\n  \"private_key\": \"%s\"\n}\n", pubHex.c_str(), privHex.c_str());
-        return 0;
-      }
-    }
+  // Allocate pool
+  if (!gpu_seedpool_init_bytes(p->poolBytes)) {
+    std::wstring* w = new std::wstring(L"Failed to allocate seed pool in VRAM. Reduce Seed pool (MB).");
+    PostMessageW(g_hwndMain, WM_APP_ERROR, 0, (LPARAM)w);
+    delete p;
+    g_running.store(false, std::memory_order_relaxed);
+    return 0;
   }
 
-  // ---------------- Mode A (default): pipelined GPU seedgen + CPU verify ----------------
-  std::string prefix = (argc >= 2) ? argv[1] : "";
-  const size_t BATCH = (argc >= 3) ? (size_t)std::stoull(argv[2]) : (size_t)200000;
+  // Fill pool once
+  const size_t poolSeeds = gpu_seedpool_seed_count();
+  uint64_t base = (uint64_t)g_seedBaseCounter.fetch_add((unsigned long long)poolSeeds, std::memory_order_relaxed);
+  if (!gpu_seedpool_generate(base, stream)) {
+    std::wstring* w = new std::wstring(L"Failed to generate seed pool.");
+    PostMessageW(g_hwndMain, WM_APP_ERROR, 0, (LPARAM)w);
+    gpu_seedpool_free();
+    delete p;
+    g_running.store(false, std::memory_order_relaxed);
+    return 0;
+  }
+  cudaDeviceSynchronize();
 
-  unsigned int hw = std::thread::hardware_concurrency();
-  unsigned int THREADS = (argc >= 4) ? (unsigned)std::stoul(argv[3]) : (hw > 1 ? (hw - 1) : 1);
-  if (THREADS < 1) THREADS = 1;
-
-  std::printf("Mode A: Searching for pubkey hex prefix: '%s'\n", prefix.c_str());
-  std::printf("Batch=%llu seeds, CPU threads=%u\n", (unsigned long long)BATCH, THREADS);
-
-  // --- Double-buffer: 2 streams, 2 device buffers, 2 pinned host buffers ---
-  cudaStream_t s0{}, s1{};
-  cudaStreamCreate(&s0);
-  cudaStreamCreate(&s1);
-
-  uint8_t *d0=nullptr, *d1=nullptr;
-  cudaMalloc((void**)&d0, BATCH * 32);
-  cudaMalloc((void**)&d1, BATCH * 32);
-
-  uint8_t *h0=nullptr, *h1=nullptr;
-  cudaMallocHost((void**)&h0, BATCH * 32); // pinned
-  cudaMallocHost((void**)&h1, BATCH * 32); // pinned
-
-  std::atomic<bool> found(false);
-  std::mutex foundMu;
-  KeypairResult foundKp{};
-  std::atomic<uint64_t> totalTries(0);
+  size_t cursor = 0;
 
   auto t0 = std::chrono::steady_clock::now();
-  auto lastPrint = t0;
+  auto lastRate = t0;
 
-  uint64_t baseCounter = 0x12345678ABCDEF00ULL;
+  while (!g_stop.load(std::memory_order_relaxed)) {
+    GpuHit hit = gpu_find_pubkey_prefix_ed25519_cuda_seedpool(p->prefix, p->batch, &cursor, stream);
 
-  // Kick off first batch on stream 0 (d0->h0)
-  gpu_generate_seeds(d0, BATCH, baseCounter, s0);
-  cudaMemcpyAsync(h0, d0, BATCH * 32, cudaMemcpyDeviceToHost, s0);
-  baseCounter += (uint64_t)BATCH;
+    const unsigned long long total =
+      g_totalTries.fetch_add((unsigned long long)p->batch, std::memory_order_relaxed)
+      + (unsigned long long)p->batch;
 
-  bool nextIs1 = true; // next launch uses buffer 1; while we verify 0 after sync
-
-  while (!found.load(std::memory_order_relaxed)) {
-    if (nextIs1) {
-      // Launch next batch into (d1->h1) asynchronously
-      gpu_generate_seeds(d1, BATCH, baseCounter, s1);
-      cudaMemcpyAsync(h1, d1, BATCH * 32, cudaMemcpyDeviceToHost, s1);
-      baseCounter += (uint64_t)BATCH;
-
-      // Wait for previous copy (stream 0), then verify h0
-      cudaStreamSynchronize(s0);
-      verify_batch_parallel(h0, BATCH, prefix, THREADS, found, foundMu, foundKp, totalTries);
-    } else {
-      gpu_generate_seeds(d0, BATCH, baseCounter, s0);
-      cudaMemcpyAsync(h0, d0, BATCH * 32, cudaMemcpyDeviceToHost, s0);
-      baseCounter += (uint64_t)BATCH;
-
-      cudaStreamSynchronize(s1);
-      verify_batch_parallel(h1, BATCH, prefix, THREADS, found, foundMu, foundKp, totalTries);
+    // regenerate when we wrap
+    if (cursor == 0) {
+      uint64_t base2 = (uint64_t)g_seedBaseCounter.fetch_add((unsigned long long)poolSeeds, std::memory_order_relaxed);
+      gpu_seedpool_generate(base2, stream);
     }
-
-    nextIs1 = !nextIs1;
 
     auto now = std::chrono::steady_clock::now();
-    if (now - lastPrint >= std::chrono::seconds(2)) {
-      lastPrint = now;
-      double secs = std::chrono::duration<double>(now - t0).count();
-      uint64_t tries = totalTries.load(std::memory_order_relaxed);
-      double rate = (secs > 0.0) ? (tries / secs) : 0.0;
-      std::printf("...%llu tries (%.0f keys/sec)\n", (unsigned long long)tries, rate);
+    if (now - lastRate >= std::chrono::milliseconds(250)) {
+      lastRate = now;
+      const double secs = std::chrono::duration<double>(now - t0).count();
+      const double rate = (secs > 0.0) ? (double)total / secs : 0.0;
+      const unsigned long long kps = (unsigned long long)(rate + 0.5);
+      g_lastRateKps.store(kps, std::memory_order_relaxed);
+      PostMessageW(g_hwndMain, WM_APP_RATE, 0, 0);
+    }
+
+    if (hit.found) {
+      // Sanity check on CPU
+      {
+        std::array<unsigned char,32> seedArr{};
+        for (int i = 0; i < 32; i++) seedArr[i] = hit.seed[i];
+        auto cpuKp = make_keypair_from_seed(seedArr);
+        if (memcmp(cpuKp.pub.data(), hit.pub, 32) != 0) {
+          std::wstring* w = new std::wstring(L"ERROR: GPU pub != CPU pub for winning seed.");
+          PostMessageW(g_hwndMain, WM_APP_ERROR, 0, (LPARAM)w);
+          break;
+        }
+      }
+
+      const std::string pubHex  = hex_of(hit.pub, 32);
+      const std::string privHex = hex_of(hit.priv64, 64);
+
+      std::wstring* payload = new std::wstring(utf8_to_wstring(pubHex + "\n" + privHex));
+      PostMessageW(g_hwndMain, WM_APP_FOUND, 0, (LPARAM)payload);
+      break;
     }
   }
 
-  // If we found mid-verify, we may still have an in-flight copy; that's fine—just print.
-  {
-    std::lock_guard<std::mutex> lg(foundMu);
-    std::string pubHex  = hex_of(foundKp.pub.data(), foundKp.pub.size());
-    std::string privHex = hex_of(foundKp.priv64.data(), foundKp.priv64.size());
-    std::printf("{\n  \"public_key\": \"%s\",\n  \"private_key\": \"%s\"\n}\n", pubHex.c_str(), privHex.c_str());
+  gpu_seedpool_free();
+
+  delete p;
+  g_running.store(false, std::memory_order_relaxed);
+  g_stop.store(false, std::memory_order_relaxed);
+
+  PostMessageW(g_hwndMain, WM_APP_RATE, 0, 0);
+  return 0;
+}
+
+// -------------------- Benchmark thread --------------------
+struct BenchParams { size_t batch = 500000; };
+
+static DWORD WINAPI BenchProc(LPVOID lp) {
+  BenchParams* p = (BenchParams*)lp;
+
+  const std::string hardPrefix = "FFFFFFFFFFFFFFFF"; // effectively "never" found quickly
+  const int iters = 6;
+
+  unsigned long long totalKeys = 0;
+  auto t0 = std::chrono::steady_clock::now();
+
+  for (int i = 0; i < iters; i++) {
+    if (!g_benchRunning.load(std::memory_order_relaxed)) break;
+    (void)gpu_find_pubkey_prefix_ed25519_cuda(hardPrefix, p->batch);
+    totalKeys += (unsigned long long)p->batch;
   }
 
-  // Cleanup
-  cudaFreeHost(h0);
-  cudaFreeHost(h1);
-  cudaFree(d0);
-  cudaFree(d1);
-  cudaStreamDestroy(s0);
-  cudaStreamDestroy(s1);
+  auto t1 = std::chrono::steady_clock::now();
+  const double secs = std::chrono::duration<double>(t1 - t0).count();
+  const unsigned long long kps = (secs > 0.0) ? (unsigned long long)((double)totalKeys / secs + 0.5) : 0;
 
+  g_benchRateKps.store(kps, std::memory_order_relaxed);
+  g_benchRunning.store(false, std::memory_order_relaxed);
+
+  PostMessageW(g_hwndMain, WM_APP_BENCHDONE, 0, 0);
+
+  delete p;
   return 0;
+}
+
+// -------------------- Window Proc --------------------
+static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+  switch (msg) {
+    case WM_CREATE: {
+      g_hwndMain = hwnd;
+
+      nvml_try_init();
+      SetTimer(hwnd, TIMER_UI, 250, nullptr);
+
+      // GPU model
+      std::wstring gpuName = L"GPU: (unknown)";
+      int dev = 0;
+      if (cudaGetDevice(&dev) == cudaSuccess) {
+        cudaDeviceProp prop{};
+        if (cudaGetDeviceProperties(&prop, dev) == cudaSuccess) {
+          gpuName = L"GPU: " + utf8_to_wstring(prop.name);
+        }
+      }
+
+      HFONT hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+      HFONT hMono = (HFONT)GetStockObject(ANSI_FIXED_FONT);
+
+      // Layout grid
+      int x = 12;
+      int y = 12;
+
+      // Row 1: prefix, batch, seed pool, pool info
+      CreateWindowW(L"STATIC", L"Prefix (hex):", WS_CHILD | WS_VISIBLE, x, y, 90, 20, hwnd, nullptr, nullptr, nullptr);
+      g_hPrefix = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"146880",
+        WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+        x + 92, y - 2, 240, 24, hwnd, (HMENU)IDC_PREFIX, nullptr, nullptr);
+
+      CreateWindowW(L"STATIC", L"Batch:", WS_CHILD | WS_VISIBLE, x + 345, y, 45, 20, hwnd, nullptr, nullptr, nullptr);
+      g_hBatch = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"500000",
+        WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+        x + 392, y - 2, 120, 24, hwnd, (HMENU)IDC_BATCH, nullptr, nullptr);
+
+      CreateWindowW(L"STATIC", L"Seed pool (MB):", WS_CHILD | WS_VISIBLE, x + 525, y, 95, 20, hwnd, nullptr, nullptr, nullptr);
+      g_hPoolMB = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"1024",
+        WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+        x + 625, y - 2, 80, 24, hwnd, (HMENU)IDC_POOL_MB, nullptr, nullptr);
+
+      g_hPoolInfo = CreateWindowW(L"STATIC", L"Pool: -", WS_CHILD | WS_VISIBLE,
+        x + 715, y, 220, 20, hwnd, (HMENU)IDC_POOL_INFO, nullptr, nullptr);
+
+      // Row 2: buttons
+      y += 32;
+      g_hStart = CreateWindowW(L"BUTTON", L"Start", WS_CHILD | WS_VISIBLE, x, y, 90, 28, hwnd, (HMENU)IDC_START, nullptr, nullptr);
+      g_hStop  = CreateWindowW(L"BUTTON", L"Stop",  WS_CHILD | WS_VISIBLE | WS_DISABLED, x + 98, y, 90, 28, hwnd, (HMENU)IDC_STOP, nullptr, nullptr);
+      g_hBench = CreateWindowW(L"BUTTON", L"Benchmark", WS_CHILD | WS_VISIBLE, x + 196, y, 110, 28, hwnd, (HMENU)IDC_BENCH, nullptr, nullptr);
+
+      // Row 3: GPU / load / counters
+      y += 40;
+      g_hGpuName = CreateWindowW(L"STATIC", gpuName.c_str(), WS_CHILD | WS_VISIBLE, x, y, 920, 20, hwnd, (HMENU)IDC_GPU_NAME, nullptr, nullptr);
+
+      y += 22;
+      g_hGpuLoad = CreateWindowW(L"STATIC", L"GPU Load: N/A", WS_CHILD | WS_VISIBLE, x, y, 160, 20, hwnd, (HMENU)IDC_GPU_LOAD, nullptr, nullptr);
+      g_hTries   = CreateWindowW(L"STATIC", L"Keys tried: 0", WS_CHILD | WS_VISIBLE, x + 170, y, 300, 20, hwnd, (HMENU)IDC_TRIES, nullptr, nullptr);
+      g_hSpeed   = CreateWindowW(L"STATIC", L"Speed: 0 keys/sec", WS_CHILD | WS_VISIBLE, x + 490, y, 300, 20, hwnd, (HMENU)IDC_SPEED, nullptr, nullptr);
+      g_hRuntime = CreateWindowW(L"STATIC", L"Runtime: 00:00:00", WS_CHILD | WS_VISIBLE, x + 810, y, 200, 20, hwnd, (HMENU)IDC_RUNTIME, nullptr, nullptr);
+
+      // Estimates box (multiline read-only edit so text wraps nicely)
+      y += 28;
+      g_hEstBox = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+        WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY | WS_VSCROLL,
+        x, y, 980, 110, hwnd, (HMENU)IDC_EST_BOX, nullptr, nullptr);
+
+      // Results
+      y += 125;
+      CreateWindowW(L"STATIC", L"Result (when found):", WS_CHILD | WS_VISIBLE, x, y, 200, 20, hwnd, nullptr, nullptr, nullptr);
+
+      y += 24;
+      CreateWindowW(L"STATIC", L"Public Key:", WS_CHILD | WS_VISIBLE, x, y, 80, 20, hwnd, nullptr, nullptr, nullptr);
+      g_hPub = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+        WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
+        x + 90, y - 2, 890, 24, hwnd, (HMENU)IDC_RESULT_PUB, nullptr, nullptr);
+
+      y += 34;
+      CreateWindowW(L"STATIC", L"Private Key:", WS_CHILD | WS_VISIBLE, x, y, 80, 20, hwnd, nullptr, nullptr, nullptr);
+      g_hPriv = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+        WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
+        x + 90, y - 2, 890, 24, hwnd, (HMENU)IDC_RESULT_PRIV, nullptr, nullptr);
+
+      // fonts
+      auto setfont = [&](HWND h, HFONT f){ SendMessageW(h, WM_SETFONT, (WPARAM)f, TRUE); };
+      setfont(g_hPrefix, hFont);
+      setfont(g_hBatch,  hFont);
+      setfont(g_hPoolMB, hFont);
+      setfont(g_hPoolInfo, hFont);
+
+      setfont(g_hStart, hFont);
+      setfont(g_hStop,  hFont);
+      setfont(g_hBench, hFont);
+
+      setfont(g_hGpuName, hFont);
+      setfont(g_hGpuLoad, hFont);
+      setfont(g_hTries,   hFont);
+      setfont(g_hSpeed,   hFont);
+      setfont(g_hRuntime, hFont);
+
+      setfont(g_hEstBox, hFont);
+
+      setfont(g_hPub,  hMono);
+      setfont(g_hPriv, hMono);
+
+      g_timerArmed.store(false, std::memory_order_relaxed);
+      g_foundFreeze.store(false, std::memory_order_relaxed);
+      update_ui_all();
+      return 0;
+    }
+
+    case WM_TIMER: {
+      if (wParam == TIMER_UI) {
+        unsigned int load = 0;
+        if (!g_nvmlReady) nvml_try_init();
+        if (nvml_get_gpu_load(load)) set_text(g_hGpuLoad, L"GPU Load: " + std::to_wstring(load) + L"%");
+        else set_text(g_hGpuLoad, L"GPU Load: N/A");
+
+        update_ui_all();
+      }
+      return 0;
+    }
+
+    case WM_COMMAND: {
+      const int id = LOWORD(wParam);
+
+      if (id == IDC_START) {
+        if (g_running.load(std::memory_order_relaxed)) return 0;
+
+        const std::string prefix = wstring_to_utf8(get_text_w(g_hPrefix));
+
+        long long batchLL = _wtoll(get_text_w(g_hBatch).c_str());
+        if (batchLL <= 0) batchLL = 500000;
+        size_t batch = (size_t)batchLL;
+
+        long long poolMBLL = _wtoll(get_text_w(g_hPoolMB).c_str());
+        if (poolMBLL <= 0) poolMBLL = 1024;
+        size_t poolBytesWanted = (size_t)poolMBLL * 1024ULL * 1024ULL;
+
+        // Clamp to free VRAM with a margin
+        size_t freeB = 0, totalB = 0;
+        if (cudaMemGetInfo(&freeB, &totalB) == cudaSuccess) {
+          size_t margin = 256ULL * 1024ULL * 1024ULL;
+          if (freeB > margin && poolBytesWanted > (freeB - margin)) poolBytesWanted = freeB - margin;
+        }
+
+        set_text(g_hPub, L"");
+        set_text(g_hPriv, L"");
+
+        // arm runtime timer
+        g_runStart = std::chrono::steady_clock::now();
+        g_runEnd = g_runStart;
+        g_timerArmed.store(true, std::memory_order_relaxed);
+        g_foundFreeze.store(false, std::memory_order_relaxed);
+
+        g_stop.store(false, std::memory_order_relaxed);
+        g_running.store(true, std::memory_order_relaxed);
+
+        EnableWindow(g_hStart, FALSE);
+        EnableWindow(g_hStop, TRUE);
+        EnableWindow(g_hBench, FALSE);
+
+        WorkerParams* p = new WorkerParams();
+        p->prefix = prefix;
+        p->batch = batch;
+        p->poolBytes = poolBytesWanted;
+
+        g_worker = CreateThread(nullptr, 0, WorkerProc, p, 0, nullptr);
+        return 0;
+      }
+
+      if (id == IDC_STOP) {
+        if (!g_running.load(std::memory_order_relaxed)) return 0;
+        g_stop.store(true, std::memory_order_relaxed);
+        EnableWindow(g_hStop, FALSE);
+
+        g_runEnd = std::chrono::steady_clock::now();
+        g_running.store(false, std::memory_order_relaxed);
+        return 0;
+      }
+
+      if (id == IDC_BENCH) {
+        if (g_running.load(std::memory_order_relaxed)) return 0;
+        if (g_benchRunning.load(std::memory_order_relaxed)) return 0;
+
+        long long batchLL = _wtoll(get_text_w(g_hBatch).c_str());
+        if (batchLL <= 0) batchLL = 500000;
+
+        g_benchRunning.store(true, std::memory_order_relaxed);
+        EnableWindow(g_hBench, FALSE);
+        set_text(g_hEstBox, L"Benchmarking...\r\n(ETA will use this rate when not running)");
+
+        BenchParams* bp = new BenchParams();
+        bp->batch = (size_t)batchLL;
+        g_benchThread = CreateThread(nullptr, 0, BenchProc, bp, 0, nullptr);
+        return 0;
+      }
+
+      return 0;
+    }
+
+    case WM_APP_RATE: {
+      update_ui_all();
+      if (!g_running.load(std::memory_order_relaxed)) {
+        EnableWindow(g_hStart, TRUE);
+        EnableWindow(g_hStop, FALSE);
+        EnableWindow(g_hBench, !g_benchRunning.load(std::memory_order_relaxed));
+      }
+      return 0;
+    }
+
+    case WM_APP_BENCHDONE: {
+      EnableWindow(g_hBench, TRUE);
+      update_ui_all();
+      return 0;
+    }
+
+    case WM_APP_FOUND: {
+      g_runEnd = std::chrono::steady_clock::now();
+      g_running.store(false, std::memory_order_relaxed);
+      g_foundFreeze.store(true, std::memory_order_relaxed);
+
+      std::wstring* payload = (std::wstring*)lParam;
+      if (payload) {
+        size_t pos = payload->find(L'\n');
+        std::wstring pub = (pos == std::wstring::npos) ? *payload : payload->substr(0, pos);
+        std::wstring priv = (pos == std::wstring::npos) ? L"" : payload->substr(pos + 1);
+        set_text(g_hPub, pub);
+        set_text(g_hPriv, priv);
+        delete payload;
+      }
+
+      g_stop.store(true, std::memory_order_relaxed);
+
+      EnableWindow(g_hStart, TRUE);
+      EnableWindow(g_hStop, FALSE);
+      EnableWindow(g_hBench, TRUE);
+
+      update_ui_all();
+      return 0;
+    }
+
+    case WM_APP_ERROR: {
+      g_runEnd = std::chrono::steady_clock::now();
+      g_running.store(false, std::memory_order_relaxed);
+
+      std::wstring* w = (std::wstring*)lParam;
+      if (w) { MessageBoxW(hwnd, w->c_str(), L"Error", MB_ICONERROR | MB_OK); delete w; }
+
+      g_stop.store(true, std::memory_order_relaxed);
+
+      EnableWindow(g_hStart, TRUE);
+      EnableWindow(g_hStop, FALSE);
+      EnableWindow(g_hBench, TRUE);
+
+      update_ui_all();
+      return 0;
+    }
+
+    case WM_DESTROY: {
+      KillTimer(hwnd, TIMER_UI);
+
+      if (g_running.load(std::memory_order_relaxed)) {
+        g_stop.store(true, std::memory_order_relaxed);
+        if (g_worker) { WaitForSingleObject(g_worker, 3000); CloseHandle(g_worker); g_worker = nullptr; }
+      }
+
+      if (g_benchRunning.load(std::memory_order_relaxed)) {
+        g_benchRunning.store(false, std::memory_order_relaxed);
+        if (g_benchThread) { WaitForSingleObject(g_benchThread, 3000); CloseHandle(g_benchThread); g_benchThread = nullptr; }
+      }
+
+      nvml_shutdown();
+      PostQuitMessage(0);
+      return 0;
+    }
+  }
+
+  return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+// -------------------- GUI main --------------------
+static int GuiMain(HINSTANCE hInst, int nCmdShow) {
+  INITCOMMONCONTROLSEX icc{ sizeof(icc), ICC_STANDARD_CLASSES };
+  InitCommonControlsEx(&icc);
+
+  const wchar_t* CLASS_NAME = L"MeshcoreCudaKeygenGuiWnd";
+
+  WNDCLASSEXW wc{};
+  wc.cbSize = sizeof(wc);
+  wc.lpfnWndProc = WndProc;
+  wc.hInstance = hInst;
+  wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+  wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+  wc.lpszClassName = CLASS_NAME;
+
+  if (!RegisterClassExW(&wc)) return 0;
+
+  HWND hwnd = CreateWindowExW(
+    0, CLASS_NAME, L"Meshcore CUDA Keygen",
+    WS_OVERLAPPEDWINDOW,
+    CW_USEDEFAULT, CW_USEDEFAULT, 1030, 520,
+    nullptr, nullptr, hInst, nullptr
+  );
+
+  if (!hwnd) return 0;
+
+  ShowWindow(hwnd, nCmdShow);
+  UpdateWindow(hwnd);
+
+  MSG m;
+  while (GetMessageW(&m, nullptr, 0, 0)) {
+    TranslateMessage(&m);
+    DispatchMessageW(&m);
+  }
+  return (int)m.wParam;
+}
+
+int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
+  return GuiMain(hInst, nCmdShow);
 }
