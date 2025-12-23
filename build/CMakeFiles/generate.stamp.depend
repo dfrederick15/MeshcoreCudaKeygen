@@ -123,10 +123,10 @@ C:/Program Files/CMake/share/cmake-4.2/Modules/Platform/Windows-NVIDIA-CUDA.cmak
 C:/Program Files/CMake/share/cmake-4.2/Modules/Platform/Windows.cmake
 C:/Program Files/CMake/share/cmake-4.2/Modules/Platform/WindowsPaths.cmake
 C:/Program Files/CMake/share/cmake-4.2/Modules/SelectLibraryConfigurations.cmake
-C:/Users/Devin Frederick/OneDrive/Documents/VSCode/MeshcoreCudaKeygen/CMakeLists.txt
-C:/Users/Devin Frederick/OneDrive/Documents/VSCode/MeshcoreCudaKeygen/build/CMakeFiles/4.2.1/CMakeCUDACompiler.cmake
-C:/Users/Devin Frederick/OneDrive/Documents/VSCode/MeshcoreCudaKeygen/build/CMakeFiles/4.2.1/CMakeCXXCompiler.cmake
-C:/Users/Devin Frederick/OneDrive/Documents/VSCode/MeshcoreCudaKeygen/build/CMakeFiles/4.2.1/CMakeRCCompiler.cmake
-C:/Users/Devin Frederick/OneDrive/Documents/VSCode/MeshcoreCudaKeygen/build/CMakeFiles/4.2.1/CMakeSystem.cmake
+C:/dev/MeshcoreCudaKeygen/CMakeLists.txt
+C:/dev/MeshcoreCudaKeygen/build/CMakeFiles/4.2.1/CMakeCUDACompiler.cmake
+C:/dev/MeshcoreCudaKeygen/build/CMakeFiles/4.2.1/CMakeCXXCompiler.cmake
+C:/dev/MeshcoreCudaKeygen/build/CMakeFiles/4.2.1/CMakeRCCompiler.cmake
+C:/dev/MeshcoreCudaKeygen/build/CMakeFiles/4.2.1/CMakeSystem.cmake
 C:/vcpkg/installed/x64-windows/share/openssl/vcpkg-cmake-wrapper.cmake
 C:/vcpkg/scripts/buildsystems/vcpkg.cmake

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025 Devin Frederick
 // src/gui_main.cpp
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>

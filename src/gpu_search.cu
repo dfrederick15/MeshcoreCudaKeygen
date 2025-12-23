@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025 Devin Frederick
 #include "gpu_search.cuh"
 #include <cuda_runtime.h>
 #include <cstdio>

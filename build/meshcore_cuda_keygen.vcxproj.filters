@@ -1,12 +1,17 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
-    <ClCompile Include="C:\Users\Devin Frederick\OneDrive\Documents\VSCode\MeshcoreCudaKeygen\src\main.cpp">
+    <ClCompile Include="C:\dev\MeshcoreCudaKeygen\src\main.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="C:\Users\Devin Frederick\OneDrive\Documents\VSCode\MeshcoreCudaKeygen\src\cpu_ref.cpp">
+    <ClCompile Include="C:\dev\MeshcoreCudaKeygen\src\cpu_ref.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="C:\dev\MeshcoreCudaKeygen\src\gpu_search_ed25519_cuda.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <CudaCompile Include="..\src\kernel.cu">
@@ -16,6 +21,12 @@
       <Filter>Source Files</Filter>
     </CudaCompile>
     <CudaCompile Include="..\src\gpu_search_ed25519_cuda.cu">
+      <Filter>Source Files</Filter>
+    </CudaCompile>
+    <CudaCompile Include="..\src\ed25519_pubonly.cu">
+      <Filter>Source Files</Filter>
+    </CudaCompile>
+    <CudaCompile Include="..\src\seedpool.cu">
       <Filter>Source Files</Filter>
     </CudaCompile>
     <CudaCompile Include="..\external\ed25519_cuda\add_scalar.cu">
@@ -59,11 +70,14 @@
     </CudaCompile>
   </ItemGroup>
   <ItemGroup>
-    <CustomBuild Include="C:\Users\Devin Frederick\OneDrive\Documents\VSCode\MeshcoreCudaKeygen\CMakeLists.txt" />
+    <CustomBuild Include="C:\dev\MeshcoreCudaKeygen\CMakeLists.txt" />
   </ItemGroup>
   <ItemGroup>
+    <Filter Include="Header Files">
+      <UniqueIdentifier>{CAB41D51-BD04-3A4B-A975-EBF4C379D0D1}</UniqueIdentifier>
+    </Filter>
     <Filter Include="Source Files">
-      <UniqueIdentifier>{41D8A01B-80FD-3A90-80C1-7E6411F7058F}</UniqueIdentifier>
+      <UniqueIdentifier>{A49842C4-962D-3068-83CE-BC3335862DB1}</UniqueIdentifier>
     </Filter>
   </ItemGroup>
 </Project>

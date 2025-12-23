@@ -1,4 +1,4 @@
-C:/Users/Devin Frederick/OneDrive/Documents/VSCode/MeshcoreCudaKeygen/build/CMakeFiles/meshcore_cuda_keygen.dir
-C:/Users/Devin Frederick/OneDrive/Documents/VSCode/MeshcoreCudaKeygen/build/CMakeFiles/meshcore_cuda_keygen_gui.dir
-C:/Users/Devin Frederick/OneDrive/Documents/VSCode/MeshcoreCudaKeygen/build/CMakeFiles/ALL_BUILD.dir
-C:/Users/Devin Frederick/OneDrive/Documents/VSCode/MeshcoreCudaKeygen/build/CMakeFiles/ZERO_CHECK.dir
+C:/dev/MeshcoreCudaKeygen/build/CMakeFiles/meshcore_cuda_keygen.dir
+C:/dev/MeshcoreCudaKeygen/build/CMakeFiles/meshcore_cuda_keygen_gui.dir
+C:/dev/MeshcoreCudaKeygen/build/CMakeFiles/ALL_BUILD.dir
+C:/dev/MeshcoreCudaKeygen/build/CMakeFiles/ZERO_CHECK.dir
